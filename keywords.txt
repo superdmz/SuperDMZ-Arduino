@@ -1,0 +1,26 @@
+#######################################
+# Syntax Coloring Map for SuperDMZ
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+SuperDMZ	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+loop	KEYWORD2
+onStatus	KEYWORD2
+isOnline	KEYWORD2
+publicUrl	KEYWORD2
+bytesIn	KEYWORD2
+bytesOut	KEYWORD2
+reconnect	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################

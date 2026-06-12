@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  arduino-lint:
+    name: Arduino Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Arduino Lint
+        uses: arduino/arduino-lint-action@v1
+        with:
+          library-manager: submit
+          compliance: strict
+          project-type: library
+
+  compile-matrix:
+    name: Compile (${{ matrix.fqbn }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fqbn:
+          - "esp32:esp32:esp32"        # classic ESP32 WROOM-32
+          - "esp32:esp32:esp32s2"      # ESP32-S2
+          - "esp32:esp32:esp32s3"      # ESP32-S3
+          - "esp32:esp32:esp32c3"      # ESP32-C3
+          - "esp32:esp32:esp32c6"      # ESP32-C6
+          - "esp32:esp32:nano_nora"    # Arduino Nano ESP32
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile examples for ${{ matrix.fqbn }}
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.fqbn }}
+          platforms: |
+            - name: "esp32:esp32"
+              source-url: "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+              version: "2.0.17"
+          libraries: |
+            - source-path: ./
+            - name: "WebSockets"
+            - name: "ArduinoJson"
+          sketch-paths: |
+            - examples/HelloWorld
+            - examples/WebServerBridge
+            - examples/ProvisioningPortal
+          enable-warnings-report: true
+          enable-deltas-report: true
