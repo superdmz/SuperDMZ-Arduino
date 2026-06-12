@@ -98,9 +98,12 @@ Força reconexão. Raramente necessário — auto-reconnect já cobre quase tudo
 
 ## Exemplos incluídos
 
-- **HelloWorld** — WebServer.h básico, página estática.
-- **WebServerBridge** — ESPAsyncWebServer com endpoints JSON e controle de GPIO.
-- **ProvisioningPortal** — captive portal de setup (WiFi + token salvos em NVS).
+Os 4 exemplos cobrem do "10 linhas pra testar" até o "template pronto pra virar produto":
+
+- **HelloWorld** *(~50 linhas)* — `WebServer.h` básico, página estática, credenciais hardcoded. É a pedagogia: lê em 1 min, roda em 5.
+- **WebServerBridge** *(~80 linhas)* — `ESPAsyncWebServer` com endpoints JSON e controle de GPIO. Demonstra integração com a lib HTTP async mais usada em projetos IoT sérios.
+- **ProvisioningPortal** *(~280 linhas)* — production-grade. Captive portal com scan de redes WiFi, NVS persistente, status dashboard servida pelo tunnel (3 cards: SuperDMZ / WiFi / Sistema com auto-refresh), botão GPIO0 (3 s reconfig WiFi, 10 s factory reset), transição AP→STA sem reboot.
+- **SmartIoT** *(~380 linhas)* — template completo pra virar produto. Tudo do ProvisioningPortal + telemetria com sensores sintéticos (substitua por DS18B20/BME280/etc), dashboard com sparkline de temperatura, endpoint `/api/telemetry` JSON pra integrações externas, e OTA via tunnel (POST de `.bin` em `/api/ota` faz o ESP atualizar firmware sem precisar acesso físico).
 
 ## Licença
 

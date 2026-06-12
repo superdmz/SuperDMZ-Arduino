@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-12
+
+### Added
+- **New example: `SmartIoT`** — full production template combining the
+  ProvisioningPortal flow with telemetry, a live dashboard, and OTA over
+  the tunnel. Includes a synthetic temperature/humidity sensor, a vanilla-JS
+  sparkline of temperature history, `/api/telemetry` JSON endpoint, and OTA
+  via POST to `/api/ota`.
+
+### Changed
+- **`ProvisioningPortal` rewritten as production-grade.** Now includes:
+  - Captive portal **WiFi network scan** with dropdown of SSIDs sorted by
+    signal strength (no more typing the SSID by hand).
+  - **In-place AP → STA transition** after saving config — no reboot needed.
+  - **Live status dashboard** served via the tunnel with three cards
+    (SuperDMZ / WiFi / System) auto-refreshing every 5 s.
+  - **GPIO0 button** with two hold durations: 3 s reconfigures WiFi while
+    keeping the token, 10 s factory-resets everything.
+  - AP SSID now derived from the chip MAC (`SuperDMZ-Setup-XXXX`) so
+    multiple devices don't collide in the same room.
+
+### Notes
+- This is a feature release. The library API (`SuperDMZ` class) is
+  unchanged — existing code using v1.0.x keeps working without changes.
+- `HelloWorld` and `WebServerBridge` are deliberately kept minimal for
+  pedagogy; production users should base their work on `SmartIoT`.
+
 ## [1.0.2] - 2026-06-12
 
 ### Changed
