@@ -60,7 +60,7 @@ const char* SuperDMZ::typeName(MsgType t) {
   }
 }
 
-// ─── Resolve node URL via painel ──────────────────────────────────────────────
+// ─── Resolve node URL via the panel ───────────────────────────────────────────
 String SuperDMZ::resolveNodeUrl() {
   if (_node.length() > 0) {
     return String("wss://") + _node + SUPERDMZ_WS_PATH;
@@ -242,8 +242,8 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
 
 // ─── Per-conn ─────────────────────────────────────────────────────────────────
 void SuperDMZ::handleNewConn(const String& connId, uint16_t localPort) {
-  // Usa a porta passada pelo lib se o server pediu uma diferente — assim o
-  // usuario tem controle final. Mas se server especificou, prefere a do server.
+  // Prefer the server-provided port; fall back to the user-provided one if
+  // the server didn't specify. The server is authoritative when it does.
   uint16_t port = localPort > 0 ? localPort : _localPort;
   StreamState* s = new StreamState();
   if (!s->client.connect(IPAddress(127, 0, 0, 1), port, 2000)) {

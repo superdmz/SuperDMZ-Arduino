@@ -1,11 +1,12 @@
 // SuperDMZ — ProvisioningPortal
 //
-// Salva WiFi + token em NVS (Preferences). Na primeira boot (ou apos reset
-// via botao no GPIO0) sobe um Soft-AP "SuperDMZ-Setup" + captive portal pra
-// usuario configurar via celular. Depois reboota e roda em modo cliente.
+// Stores WiFi + token in NVS (Preferences). On first boot (or after a reset
+// via the GPIO0 button) it brings up a "SuperDMZ-Setup" Soft-AP plus a
+// captive portal so the user can configure it from their phone. After saving
+// it reboots and runs as a regular client.
 //
-// Util pra produto comercial: voce nao precisa recompilar pra cada cliente,
-// nem distribuir token em texto plano no firmware.
+// Useful for commercial products: you don't need to recompile for each
+// customer, and tokens never live in plain text inside the firmware image.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -13,7 +14,7 @@
 #include <DNSServer.h>
 #include <SuperDMZ.h>
 
-#define RESET_PIN  0   // botao BOOT (GPIO0) — segure 3s no boot pra resetar config
+#define RESET_PIN  0   // BOOT button (GPIO0) — hold 3 s at boot to reset config
 
 Preferences prefs;
 WebServer    portalSrv(80);
@@ -32,13 +33,13 @@ h1{color:#60a5fa}label{display:block;margin-top:.8rem;font-size:.9rem}
 input{width:100%;padding:.6rem;border:1px solid #334155;background:#1e293b;color:#e5e7eb;border-radius:.4rem;box-sizing:border-box}
 button{margin-top:1.2rem;width:100%;padding:.75rem;background:#2563eb;color:#fff;border:0;border-radius:.4rem;font-weight:600}
 .hint{font-size:.78rem;color:#94a3b8;margin-top:.2rem}</style>
-</head><body><h1>Configurar SuperDMZ</h1>
+</head><body><h1>Configure SuperDMZ</h1>
 <form action='/save' method='POST'>
 <label>WiFi SSID<input name='ssid' required></label>
-<label>WiFi senha<input name='pass' type='password'></label>
+<label>WiFi password<input name='pass' type='password'></label>
 <label>SuperDMZ token<input name='token' required pattern='[a-f0-9]{32,64}'>
-<div class='hint'>48 caracteres hex, do painel superdmz.com</div></label>
-<button>Salvar e reiniciar</button>
+<div class='hint'>48 hex chars, from the superdmz.com panel</div></label>
+<button>Save and reboot</button>
 </form></body></html>)HTML";
 
 void enterPortalMode() {
@@ -58,7 +59,7 @@ void enterPortalMode() {
     prefs.putString("token", portalSrv.arg("token"));
     prefs.end();
     portalSrv.send(200, "text/html",
-      "<h2 style='font-family:system-ui'>Salvo. Reiniciando...</h2>");
+      "<h2 style='font-family:system-ui'>Saved. Rebooting...</h2>");
     delay(1500);
     ESP.restart();
   });
@@ -117,7 +118,7 @@ void setup() {
   }
   Serial.printf("[wifi] OK, IP = %s\n", WiFi.localIP().toString().c_str());
 
-  // Aqui voce sobe seu WebServer normal (omitido por brevidade)
+  // Bring up your regular WebServer here (omitted for brevity).
   // server.begin();
 
   tunnel.onStatus([](bool online, const char* url) {

@@ -1,23 +1,24 @@
 // SuperDMZ — WebServerBridge
 //
-// Demonstra integracao com ESPAsyncWebServer (mais comum em projetos IoT serios).
-// Sirva sensores, controle GPIOs, OTA — tudo via https://<seu-host>.dmzgate.com.
+// Shows integration with ESPAsyncWebServer (the common choice for serious
+// IoT projects). Serve sensors, control GPIOs, OTA — all via
+// https://<your-host>.dmzgate.com.
 
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <SuperDMZ.h>
 
-const char* WIFI_SSID = "SUA_REDE_WIFI";
-const char* WIFI_PASS = "SUA_SENHA_WIFI";
-const char* SUPERDMZ_TOKEN = "COLE_SEU_TOKEN_AQUI";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+const char* SUPERDMZ_TOKEN = "PASTE_YOUR_TOKEN_HERE";
 
 const uint16_t WEB_PORT = 80;
 AsyncWebServer server(WEB_PORT);
 SuperDMZ       tunnel;
 
 float readTempC() {
-  // Substitua pela leitura real do seu sensor (DS18B20, DHT, BMP280, etc.)
+  // Replace with your actual sensor reading (DS18B20, DHT, BMP280, etc.)
   return 22.5 + (random(-50, 50) / 10.0);
 }
 

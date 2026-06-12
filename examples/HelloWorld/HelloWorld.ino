@@ -1,22 +1,22 @@
 // SuperDMZ — HelloWorld
 //
-// O exemplo mais simples: ESP32 sobe um WebServer na porta 80 servindo "Hello"
-// e o SuperDMZ expoe ele em https://<seu-host>.dmzgate.com.
+// The simplest possible example: ESP32 brings up a WebServer on port 80
+// serving "Hello", and SuperDMZ exposes it at https://<your-host>.dmzgate.com.
 //
-// Pre-requisitos:
-//   1. Crie um tunel HTTP no painel (https://superdmz.com/?page=tunnels&action=new),
-//      anote o token. Use local_port = 80.
-//   2. Coloque o token e o WiFi abaixo.
-//   3. Compile e grave.
-//   4. Em ~5 segundos a serial deve mostrar "ONLINE: https://<host>.dmzgate.com".
+// Prerequisites:
+//   1. Create an HTTP tunnel in the panel (https://superdmz.com/?page=tunnels&action=new),
+//      copy the token. Use local_port = 80.
+//   2. Paste your token and WiFi below.
+//   3. Compile and upload.
+//   4. Within ~5 seconds Serial should print "ONLINE: https://<host>.dmzgate.com".
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SuperDMZ.h>
 
-const char* WIFI_SSID = "SUA_REDE_WIFI";
-const char* WIFI_PASS = "SUA_SENHA_WIFI";
-const char* SUPERDMZ_TOKEN = "COLE_SEU_TOKEN_AQUI";  // 48 hex chars
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+const char* SUPERDMZ_TOKEN = "PASTE_YOUR_TOKEN_HERE";  // 48 hex chars
 
 WebServer server(80);
 SuperDMZ   tunnel;

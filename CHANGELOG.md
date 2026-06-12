@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-06-12
+
+### Changed
+- All in-code comments (`//`, doc headers, captive portal HTML strings) and
+  example placeholders are now in English. Same rule as Serial output: code
+  that ships globally must be readable globally, regardless of where the
+  maintainer happens to be from.
+- `ProvisioningPortal` captive portal labels translated to English
+  ("Configure SuperDMZ", "WiFi password", "Save and reboot", etc.).
+- Sketch placeholder strings (`YOUR_WIFI_SSID`, `PASTE_YOUR_TOKEN_HERE`)
+  are now in English so the examples copy-paste cleanly anywhere.
+
+### Notes
+- No behavioural change. Existing v1.0.1 builds keep working unchanged —
+  this is purely a documentation/i18n cleanup. Upgrade is recommended for
+  cosmetic reasons only.
+
 ## [1.0.1] - 2026-06-11
 
 ### Changed
