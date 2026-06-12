@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-12
+
+### Changed (defensive: panel and code can disagree, library is authoritative)
+- The lib now **always** uses the `localPort` passed to `begin()` when forwarding
+  requests to the local WebServer. The `local_port` field from the panel's
+  tunnel configuration is treated as advisory only — if the user picked
+  HTTPS:443 in the panel by mistake but their WebServer is on HTTP:80, the
+  panel value is silently overridden. Rationale: the user knows where their
+  WebServer is listening; the panel can't get this wrong from inside an MCU.
+- Hello message now carries `platform: "arduino-esp32"`, `local_scheme: "http"`
+  and `local_port: <userPort>` so a smart relay can self-correct a misconfigured
+  tunnel record without the user having to touch the panel.
+- The previous `WARN: panel configured tunnel for port X, but library is
+  using Y` message is now an informational `note:` (and only fires when the
+  panel actually disagrees) — it's not a user-actionable warning.
+
+### Why this matters
+- A user creating their first tunnel in the panel can pick any combination of
+  `protocol/scheme/port`. With v1.1.0 a wrong choice produced a tunnel that
+  appeared "online" in the panel (WebSocket handshakes worked) but never
+  delivered any HTTP request to the device (TCP loopback was hitting the
+  wrong port). v1.1.1 makes that scenario just work.
+
 ## [1.1.0] - 2026-06-12
 
 ### Added

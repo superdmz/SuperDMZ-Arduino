@@ -163,7 +163,15 @@ void SuperDMZ::wsEvent(WStype_t type, uint8_t* payload, size_t length) {
 
     case WStype_CONNECTED: {
       Serial.println("[SuperDMZ] WS connected, sending hello");
-      String hello = String("{\"token\":\"") + _token + "\",\"version\":\"" + SUPERDMZ_VERSION + "\"}";
+      // Hello carries platform + actual local config so a smart server can
+      // self-correct a misconfigured tunnel (e.g. user picked HTTPS:443 in the
+      // panel by accident; we'll keep telling them HTTP:<userPort> is the truth).
+      String hello = String("{\"token\":\"") + _token + "\""
+                   + ",\"version\":\""      + SUPERDMZ_VERSION + "\""
+                   + ",\"platform\":\"arduino-esp32\""
+                   + ",\"local_scheme\":\"http\""
+                   + ",\"local_port\":"     + String(_localPort)
+                   + "}";
       sendEnvelope(MSG_HELLO, "", hello);
       break;
     }
@@ -200,8 +208,11 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
       uint16_t serverPort = d["port"] | 0;
       _publicUrl = pubUrl;
       _online = true;
-      if (serverPort != _localPort) {
-        Serial.printf("[SuperDMZ] WARN: panel configured tunnel for port %u, but library is using %u\n",
+      if (serverPort != 0 && serverPort != _localPort) {
+        // Panel and code disagree on local_port — library wins. Log as info,
+        // not warning: the user passed the right value to begin(), and the
+        // server has been told (via hello) about the actual config.
+        Serial.printf("[SuperDMZ] note: panel says local_port=%u, library uses %u (library wins)\n",
                       serverPort, _localPort);
       }
       Serial.printf("[SuperDMZ] ONLINE: %s -> http://localhost:%u\n", pubUrl, _localPort);
@@ -241,13 +252,16 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
 }
 
 // ─── Per-conn ─────────────────────────────────────────────────────────────────
-void SuperDMZ::handleNewConn(const String& connId, uint16_t localPort) {
-  // Prefer the server-provided port; fall back to the user-provided one if
-  // the server didn't specify. The server is authoritative when it does.
-  uint16_t port = localPort > 0 ? localPort : _localPort;
+void SuperDMZ::handleNewConn(const String& connId, uint16_t /*serverHintPort*/) {
+  // The lib ALWAYS uses the port the user passed to begin() — they know where
+  // their WebServer is listening, the panel can't get this wrong. If the panel
+  // is configured with a different local_port (e.g. someone created the tunnel
+  // as HTTPS:443 by accident), we silently override it. The user shouldn't
+  // have to keep two configs in sync.
   StreamState* s = new StreamState();
-  if (!s->client.connect(IPAddress(127, 0, 0, 1), port, 2000)) {
-    Serial.printf("[SuperDMZ][%s] failed to connect localhost:%u\n", connId.c_str(), port);
+  if (!s->client.connect(IPAddress(127, 0, 0, 1), _localPort, 2000)) {
+    Serial.printf("[SuperDMZ][%s] failed to connect localhost:%u (is your WebServer up?)\n",
+                  connId.c_str(), _localPort);
     delete s;
     sendEnvelope(MSG_CONNCLOSE, connId, "");
     return;
