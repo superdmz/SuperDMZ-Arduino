@@ -44,6 +44,12 @@ String apSSID;
 uint32_t bootMillis = 0;
 uint32_t resetHoldStart = 0;
 
+// ── Forward declarations (Arduino IDE 3.x with esp32 core 3.x doesn't always
+// ── auto-generate prototypes for functions called from within lambdas/handlers
+// ── above their definition).
+void enterAPMode(const String& reason);
+void enterSTAMode();
+
 // ── Sensor history ring buffer ───────────────────────────────────────────────
 float    tempHistory[TELEMETRY_HISTORY];
 uint8_t  histHead = 0;

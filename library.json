@@ -1,6 +1,6 @@
 {
   "name": "SuperDMZ",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Reverse tunnel for ESP32 — expose your local WebServer at https://your-host.dmzgate.com without a public IP, without opening router ports. Uses secure WebSocket (WSS) to a SuperDMZ relay node.",
   "keywords": "tunnel, reverse-tunnel, websocket, wss, iot, esp32, remote-access, ngrok-alternative, dmz, superdmz",
   "repository": {

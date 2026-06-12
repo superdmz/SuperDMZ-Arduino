@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-06-12
+
+### Fixed
+- `ProvisioningPortal` and `SmartIoT` examples failed to compile on
+  Arduino IDE 3.x with arduino-esp32 core 3.x due to `enterSTAMode()`
+  being called from `handleSave()` before its definition. The IDE's
+  automatic prototype generation didn't pick it up inside the lambda
+  context. Added explicit forward declarations for `enterAPMode()` and
+  `enterSTAMode()` at the top of both sketches.
+
+### Compatibility note
+- The `Multiple libraries were found for "WiFi.h"` message users see when
+  compiling with the Arduino IDE is informational, not an error — the
+  compiler correctly prefers the esp32-bundled WiFi over user-installed
+  WiFiNINA/WiFiEspAT for ESP32 targets. Nothing to fix on our side.
+
 ## [1.1.1] - 2026-06-12
 
 ### Changed (defensive: panel and code can disagree, library is authoritative)

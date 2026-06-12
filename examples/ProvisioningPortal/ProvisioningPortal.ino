@@ -42,6 +42,12 @@ String apSSID;            // e.g. "SuperDMZ-Setup-A4F2"
 uint32_t bootMillis = 0;
 uint32_t resetHoldStart = 0;
 
+// ── Forward declarations (Arduino IDE 3.x with esp32 core 3.x doesn't always
+// ── auto-generate prototypes for functions called from within lambdas/handlers
+// ── above their definition).
+void enterAPMode(const String& reason);
+void enterSTAMode();
+
 // ─── NVS helpers ──────────────────────────────────────────────────────────────
 void loadConfig() {
   prefs.begin("superdmz", true);
