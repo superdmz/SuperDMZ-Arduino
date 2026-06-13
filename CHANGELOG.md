@@ -4,6 +4,63 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-06-13
+
+### Fixed
+- **Large dashboard HTML over the tunnel was cut around ~10 KiB** with `curl`
+  reporting `end of response with N bytes missing`. Two changes in
+  `pumpLocalToWs()`:
+  - `SUPERDMZ_BUF_SIZE` bumped from 1024 to 4096 — drains the loopback TCP
+    buffer in a single read.
+  - Removed the early `break` when `n < sizeof(buf)`. We now drain the local
+    socket fully on every call so `WebServer.send_P()` can keep writing.
+
+  These fixes ALONE don't eliminate the deadlock between a blocking handler
+  and `loop()`-based draining: sketches that serve >10 KiB via `send_P()`
+  must still chunk and yield to `tunnel.loop()` between chunks. See the
+  `handleRoot()` of the `SmartIoT-Debug` example for the canonical pattern.
+
+### Examples reorganized
+- **Removed** `WebServerBridge` and `SmartIoT` — they were subsets of
+  `HelloWorld` and `SmartIoT-Debug` respectively. The matrix is now three
+  examples with no overlap:
+  - `HelloWorld` — quick start, hardcoded creds, `WebServer.h`.
+  - `ProvisioningPortal` — production template with captive portal.
+  - `SmartIoT-Debug` — superset of the previous `SmartIoT` with ring log,
+    network probes, OTA upload from the dashboard, token renew, NTP, node
+    region flag and city.
+- Each example folder now ships a screenshot.
+
+### Fixed (examples)
+- `ProvisioningPortal` had a route-dispatch bug where switching from STA
+  back to AP (via "Reconfigure WiFi") kept showing the status dashboard at
+  `192.168.4.1/`. Cause: the Arduino-ESP32 WebServer keeps handlers in an
+  append-only linked list — calling `server.on("/", ...)` a second time
+  ADDS a handler, never REPLACES the first one. Fix: register the routes
+  ONCE in `setup()` with a single dispatcher (`handleRootDispatch()`)
+  that picks the right page based on `appState`.
+- Same example: `server.begin()` was being called BEFORE `WiFi.mode()`,
+  so the server bound to a not-yet-initialised network interface and
+  silently dropped connections. Moved to AFTER `enterAPMode()`/`enterSTAMode()`.
+- Same example: the `status-badge` HTML started hardcoded as `"ONLINE"`,
+  so if the `/api/status` fetch failed (in AP mode the route doesn't even
+  exist) the badge stayed green. Changed default to `"OFFLINE"`; JS only
+  flips it to green when the JSON confirms the tunnel is up.
+
+### v1.2.0 attempt (NOT released)
+A FreeRTOS background-task refactor was prototyped to eliminate the
+chunking workaround in handlers entirely — `loopInternal()` would run
+in its own task with mutex-protected WS access, so a blocking
+`server.send_P()` couldn't starve the pump. The build flashed cleanly
+but the tunnel stayed silently offline (zero bytes in/out, no
+`[SuperDMZ]` events in the relay log) — suspected race between the
+synchronous `_ws.beginSSL()` in `begin()` and the first `_ws.loop()`
+inside the task. Reverted to 1.1.3. When v1.2.0 returns,
+`_ws.beginSSL()` needs to move INSIDE the task as its first action.
+
+### Validated on
+ESP32-C3 Super Mini, 4 MB flash, arduino-esp32 core 3.3.8 + Arduino IDE 2.x.
+
 ## [1.1.2] - 2026-06-12
 
 ### Fixed

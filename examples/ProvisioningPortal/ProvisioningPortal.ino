@@ -47,6 +47,8 @@ uint32_t resetHoldStart = 0;
 // ── above their definition).
 void enterAPMode(const String& reason);
 void enterSTAMode();
+void handlePortalRoot();
+void handleStatusRoot();
 
 // ─── NVS helpers ──────────────────────────────────────────────────────────────
 void loadConfig() {
@@ -94,18 +96,22 @@ input:focus,select:focus{outline:none;border-color:#60a5fa}
 button{margin-top:1.4rem;width:100%;padding:.8rem;background:#2563eb;color:#fff;border:0;border-radius:.5rem;font-weight:600;font-size:.95rem;cursor:pointer}
 button:hover{background:#1d4ed8}
 button:disabled{opacity:.5;cursor:not-allowed}
-.scan-btn{margin-top:.35rem;background:#334155;color:#cbd5e1;padding:.45rem .8rem;font-size:.78rem;border-radius:.4rem;border:0;cursor:pointer;float:right;width:auto}
+.ssid-row{display:flex;gap:.4rem;align-items:stretch;margin-top:.4rem}
+.ssid-row select{flex:1;margin:0}
+.ssid-row .scan-btn{flex:0 0 auto;width:auto;margin:0;background:#334155;color:#cbd5e1;padding:0 1rem;font-size:.85rem;border-radius:.5rem;border:0;cursor:pointer;font-weight:500;white-space:nowrap;height:auto}
+.ssid-row .scan-btn:hover{background:#475569}
 .row-bars{display:inline-block;width:1.2em;color:#34d399;font-family:monospace}
 </style></head><body>
 <h1>SuperDMZ Setup</h1>
 <p class="lead">Configure the WiFi network and your SuperDMZ token. The device will switch to client mode without rebooting.</p>
 <form action="/save" method="POST" onsubmit="document.getElementById('save').disabled=true;document.getElementById('save').textContent='Saving...'">
-<label>WiFi network
-  <button type="button" class="scan-btn" onclick="scan()">Scan</button>
+<label>WiFi network</label>
+<div class="ssid-row">
   <select name="ssid" id="ssid" required>
     <option value="">Pick a network…</option>
   </select>
-</label>
+  <button type="button" class="scan-btn" onclick="scan()">Scan</button>
+</div>
 <div class="hint" id="scan-status">Tap Scan to list nearby networks.</div>
 <label>WiFi password
   <input name="pass" type="password" autocomplete="off">
@@ -135,6 +141,16 @@ function scan(){
 )HTML";
 
 void handlePortalRoot() { server.send_P(200, "text/html", PORTAL_HTML); }
+
+// Single root handler that switches HTML based on current mode. Why: the
+// Arduino-ESP32 WebServer keeps handlers in an internal linked list — calling
+// server.on("/") a second time ADDS a handler, doesn't REPLACE the first one,
+// so the original AP/STA page wins forever. This dispatcher avoids that by
+// living in only one entry of the list.
+void handleRootDispatch() {
+  if (appState == STATE_AP) handlePortalRoot();
+  else                      handleStatusRoot();
+}
 
 void handleScan() {
   int n = WiFi.scanNetworks(false, true);
@@ -193,16 +209,8 @@ void enterAPMode(const String& reason) {
                 apSSID.c_str(), AP_PASSWORD, ip.toString().c_str());
 
   dnsServer.start(53, "*", ip);
-
-  server.close();
-  server.on("/", HTTP_GET, handlePortalRoot);
-  server.on("/scan", HTTP_GET, handleScan);
-  server.on("/save", HTTP_POST, handleSave);
-  server.onNotFound([]() {
-    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
-    server.send(302, "text/plain", "");
-  });
-  server.begin();
+  // Routes are registered ONCE in setup() — see note there. Server stays
+  // running across mode switches; handleRootDispatch picks the right page.
 }
 
 // ─── STA-mode status dashboard ───────────────────────────────────────────────
@@ -232,7 +240,7 @@ header h1{font-size:1.25rem;margin:0;color:#fff;font-weight:600}
 .btn.danger:hover{background:rgba(239,68,68,.2)}
 footer{text-align:center;color:#475569;font-size:.72rem;margin-top:1.5rem}
 </style></head><body>
-<header><h1>SuperDMZ ESP32</h1><span id="status-badge" class="badge online">ONLINE</span></header>
+<header><h1>SuperDMZ ESP32</h1><span id="status-badge" class="badge offline">OFFLINE</span></header>
 
 <div class="card">
   <h2>🔌 SuperDMZ tunnel</h2>
@@ -320,6 +328,10 @@ void enterSTAMode() {
 
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  // Knobs that help ESP32-C3/S3 stay associated with consumer routers.
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(savedSSID.c_str(), savedPass.c_str());
 
   uint32_t t0 = millis();
@@ -335,13 +347,8 @@ void enterSTAMode() {
   Serial.printf("\n[wifi] OK, IP = %s, RSSI = %d dBm\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  // Re-bind HTTP routes for status dashboard
-  server.close();
-  server.on("/", HTTP_GET, handleStatusRoot);
-  server.on("/api/status", HTTP_GET, handleApiStatus);
-  server.on("/api/reconfig", HTTP_POST, handleApiReconfig);
-  server.onNotFound([]() { server.send(404, "text/plain", "not found"); });
-  server.begin();
+  // Routes are registered ONCE in setup() — see note there. Server keeps
+  // running across mode switches; handleRootDispatch picks the right page.
 
   tunnel.onStatus([](bool online, const char* publicUrl) {
     Serial.printf("[tunnel] %s -> %s\n", online ? "ONLINE" : "OFFLINE", publicUrl);
@@ -385,11 +392,39 @@ void setup() {
                 savedSSID.c_str(),
                 savedToken.length() ? "set" : "missing");
 
+  // Register HTTP routes ONCE. The Arduino-ESP32 WebServer keeps handlers in
+  // an internal linked list that calling server.on() adds to but never
+  // removes from — re-registering "/" between modes would just stack a
+  // second handler that's ignored. So we install a single dispatcher for
+  // "/" that picks the right HTML based on appState, plus the union of
+  // both modes' API endpoints. /scan & /save are no-ops in STA mode but
+  // exist to avoid 404s if a stale portal tab is still polling them.
+  server.on("/",             HTTP_GET,  handleRootDispatch);
+  server.on("/scan",         HTTP_GET,  handleScan);
+  server.on("/save",         HTTP_POST, handleSave);
+  server.on("/api/status",   HTTP_GET,  handleApiStatus);
+  server.on("/api/reconfig", HTTP_POST, handleApiReconfig);
+  server.onNotFound([]() {
+    // In AP mode, redirect any unknown path to "/" so phones triggering
+    // captive-portal detection land on the setup page instead of seeing 404.
+    if (appState == STATE_AP) {
+      server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
+      server.send(302, "text/plain", "");
+    } else {
+      server.send(404, "text/plain", "not found");
+    }
+  });
+
   if (savedSSID.length() == 0 || savedToken.length() < 32) {
     enterAPMode("no saved config");
   } else {
     enterSTAMode();
   }
+  // Server is started AFTER WiFi.mode() has been called (inside enterAPMode
+  // or enterSTAMode) — otherwise WiFiServer binds to a not-yet-initialised
+  // network interface and never accepts connections.
+  server.begin();
+  Serial.println("[boot] HTTP server up");
 }
 
 void loop() {
@@ -397,4 +432,17 @@ void loop() {
   server.handleClient();
   if (appState == STATE_AP)  dnsServer.processNextRequest();
   if (appState == STATE_STA) tunnel.loop();
+
+  // Cheap watchdog: setAutoReconnect normally handles drops, but some APs
+  // ignore it. Re-kick reconnect every 30 s when STA is supposed to be up.
+  if (appState == STATE_STA) {
+    static uint32_t lastCheckMs = 0;
+    if (millis() - lastCheckMs > 30000) {
+      lastCheckMs = millis();
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[wifi] STA disconnected — forcing reconnect()");
+        WiFi.reconnect();
+      }
+    }
+  }
 }

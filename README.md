@@ -25,13 +25,13 @@ Framework: **Arduino-ESP32 core 2.0.14+** ou **3.0+**. Testado com Arduino IDE 2
 3. Dependências (são instaladas no mesmo prompt): **WebSockets** by Markus Sattler e **ArduinoJson** by Benoit Blanchon.
 
 Ou instalação manual:
-1. Baixe o ZIP em [superdmz.com/download/SuperDMZ-Arduino-v1.0.0.zip](https://superdmz.com/download/SuperDMZ-Arduino-v1.0.0.zip)
+1. Baixe o ZIP em [github.com/superdmz/SuperDMZ-Arduino/releases](https://github.com/superdmz/SuperDMZ-Arduino/releases)
 2. `Sketch` → `Include Library` → `Add .ZIP Library…`
 
 ### PlatformIO
 ```ini
 lib_deps =
-    superdmz/SuperDMZ@^1.0.0
+    superdmz/SuperDMZ@^1.1.3
 ```
 
 ## Uso mínimo
@@ -96,14 +96,65 @@ Força reconexão. Raramente necessário — auto-reconnect já cobre quase tudo
 - **WiFi precisa estar UP**: chame `tunnel.begin()` só depois que `WiFi.status() == WL_CONNECTED`. A lib detecta WiFi caindo e reconecta sozinha.
 - **Cert chain TLS**: a lib confia em qualquer cert TLS do node (lado outbound). O TLS termina no node, não no ESP, então a CA do tunnel é pública (Let's Encrypt) mas a verificação é simplificada pra economizar heap.
 
+## Como compilar os exemplos (passo a passo)
+
+Estes exemplos foram **desenvolvidos e validados no ESP32-C3 Super Mini** (4 MB flash, 400 KB RAM, single-core RISC-V). Devem funcionar em qualquer chip da família ESP32 (ver tabela de compatibilidade no topo), mas se algo der diferente, é provavelmente fragmentação de heap ou partition layout — começa lendo as observações abaixo.
+
+### 1. Configuração no Arduino IDE
+
+1. **Tools → Board → ESP32 Arduino → "ESP32C3 Dev Module"** (ou outro chip ESP32 que você tenha).
+2. **Tools → CPU Frequency → 160 MHz** (default; não precisa mudar).
+3. **Tools → Flash Size → 4MB (32Mb)**.
+4. **Tools → Partition Scheme**:
+   - Pra **HelloWorld** e **ProvisioningPortal** — **Default 4MB with spiffs (1.2MB APP / 1.5MB SPIFFS)** funciona.
+   - Pra **SmartIoT-Debug** — escolha **"Minimal SPIFFS (1.9MB APP with OTA / 190KB SPIFFS)"**. O sketch é grande (~970 linhas + PROGMEM de 18 KB do HTML do dashboard) e usa o feature de OTA — precisa das duas partições App0/App1 e da 1.9 MB de espaço útil.
+5. **Tools → USB CDC On Boot → Enabled** (necessário no ESP32-C3/S3 pra ver `Serial.print` via USB nativo). Em chips com chip USB→UART externo (ESP32 clássico) pode ignorar.
+6. **Tools → Erase All Flash Before Sketch Upload → Disabled** (default; só ative se quiser resetar a NVS junto com o firmware).
+
+### 2. Credenciais
+
+- **HelloWorld** — edita as 3 linhas no início do `.ino` (linhas 17-19): `WIFI_SSID`, `WIFI_PASS`, `SUPERDMZ_TOKEN`. O token sai do painel SuperDMZ ao criar um tunnel HTTP.
+- **ProvisioningPortal** e **SmartIoT-Debug** — não edita nada. Tudo é configurado no AP captive portal `SuperDMZ-Setup-XXXX` (senha `12345678`) que sobe no primeiro boot.
+
+### 3. Flash e teste
+
+1. Conecta o board no USB.
+2. **Tools → Port** → seleciona a porta do board.
+3. **Sketch → Upload** (ou ⌘U / Ctrl+U).
+4. **Tools → Serial Monitor** → 115200 baud, "Both NL & CR".
+5. Reset o board (botão RST). Você deve ver logs `[boot]`, `[wifi]`, `[SuperDMZ]`.
+
+### Observações operacionais
+
+- **`Multiple libraries were found for "WiFi.h"`** durante o build — é **informativo, não erro**. O compilador escolhe corretamente o WiFi do ESP32 Arduino core e ignora os de outras famílias (WiFiNINA, WiFiEspAT). Pode deixar como está.
+- **Não rode o sketch sem `tunnel.loop()` no `loop()`** — caso contrário o tunnel reconecta indefinidamente. (Ver bug structurel da v1.2.0 abortada no CHANGELOG.)
+- **HTML grande (>10 KB) servido via tunnel** — o `WebServer.send_P()` do Arduino-ESP32 bloqueia em `client.write()` quando o buffer loopback (~5 KB) enche. O `pumpLocalToWs()` da lib não consegue drenar porque o `loop()` está parado dentro do handler. Solução: stream em chunks chamando `tunnel.loop()` entre cada chunk de 1 KB. Veja `handleRoot()` do SmartIoT-Debug — é o padrão.
+
 ## Exemplos incluídos
 
-Os 4 exemplos cobrem do "10 linhas pra testar" até o "template pronto pra virar produto":
+Três exemplos, do "10 linhas pra testar" até o "Swiss Army knife com tudo":
 
-- **HelloWorld** *(~50 linhas)* — `WebServer.h` básico, página estática, credenciais hardcoded. É a pedagogia: lê em 1 min, roda em 5.
-- **WebServerBridge** *(~80 linhas)* — `ESPAsyncWebServer` com endpoints JSON e controle de GPIO. Demonstra integração com a lib HTTP async mais usada em projetos IoT sérios.
-- **ProvisioningPortal** *(~280 linhas)* — production-grade. Captive portal com scan de redes WiFi, NVS persistente, status dashboard servida pelo tunnel (3 cards: SuperDMZ / WiFi / Sistema com auto-refresh), botão GPIO0 (3 s reconfig WiFi, 10 s factory reset), transição AP→STA sem reboot.
-- **SmartIoT** *(~380 linhas)* — template completo pra virar produto. Tudo do ProvisioningPortal + telemetria com sensores sintéticos (substitua por DS18B20/BME280/etc), dashboard com sparkline de temperatura, endpoint `/api/telemetry` JSON pra integrações externas, e OTA via tunnel (POST de `.bin` em `/api/ota` faz o ESP atualizar firmware sem precisar acesso físico).
+### 1. HelloWorld — quick start mínimo
+
+`WebServer.h` básico, página estática, credenciais hardcoded. Lê em 1 min, roda em 5. Bom pra primeiro contato com a lib.
+
+![HelloWorld](examples/HelloWorld/HelloWorld.png)
+
+### 2. ProvisioningPortal — production template
+
+Captive portal pro cliente final configurar WiFi + token **sem rebuild**, scan de redes, NVS persistente, status dashboard servida pelo tunnel, botão GPIO0 (3 s reconfig WiFi / 10 s factory reset), transição AP↔STA sem reboot.
+
+| Captive portal (modo AP) | Dashboard (modo STA) |
+|---|---|
+| ![Setup](examples/ProvisioningPortal/ProvisioningPortal_config_Wifi.png) | ![Dashboard](examples/ProvisioningPortal/ProvisioningPortal_SuperDMZ_URL.png) |
+
+### 3. SmartIoT-Debug — completo + debug
+
+Superset do ProvisioningPortal + ring log de 80 linhas em RAM (visualizável em `/log` e no dashboard), probes de rede (DNS + TCP + TLS a Google DNS e Cloudflare DNS), card de Internet com indicador verde/vermelho por provider, NTP com data UTC, OTA via dashboard (upload de `.bin` com barra de progresso), troca de token sem reboot, info do node (bandeira + cidade puxados do painel SuperDMZ).
+
+![SmartIoT-Debug](examples/SmartIoT-Debug/SmartIoT-Debug.jpg)
+
+> **Nota sobre `.h` separado**: o `SmartIoT-Debug.ino` usa `#include "debug_html.h"` pra manter o HTML/JS do dashboard num arquivo separado. **É obrigatório.** O prototype generator do Arduino IDE 3.x interpreta o JavaScript dentro do `R"HTML(...)HTML"` como código C++ e quebra com `'function' does not name a type`. Headers `.h` escapam desse pipeline.
 
 ## Licença
 

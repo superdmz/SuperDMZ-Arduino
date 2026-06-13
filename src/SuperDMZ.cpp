@@ -5,12 +5,16 @@
 #include <HTTPClient.h>
 #include <mbedtls/base64.h>
 
-#define SUPERDMZ_VERSION    "1.0.0"
+#define SUPERDMZ_VERSION    "1.1.3"
 #define SUPERDMZ_PANEL_API  "https://superdmz.com/api"
 #define SUPERDMZ_DEFAULT_NODE "spo1.nodes.superdmz.com"
 #define SUPERDMZ_WS_PATH    "/ws/tunnel"
 #define SUPERDMZ_PING_MS    20000
-#define SUPERDMZ_BUF_SIZE   1024
+// Sized for large dashboard HTML over the tunnel. Smaller than this leaves
+// the loopback TCP buffer perpetually full while WebServer.send_P() blocks
+// trying to write, and the request gets cut after ~10 s. 4 KiB drains the
+// buffer in one pass for most responses.
+#define SUPERDMZ_BUF_SIZE   4096
 
 SuperDMZ* SuperDMZ::_instance = nullptr;
 
@@ -333,7 +337,9 @@ void SuperDMZ::pumpLocalToWs() {
         sendEnvelope(MSG_DATA, kv.first, payload);
       }
       free(b64);
-      if (n < (int)sizeof(buf)) break;  // give other streams a turn
+      // No early break: we MUST drain the local socket fully here so
+      // WebServer.send_P() can keep writing instead of blocking on a full
+      // TCP buffer (which used to cut large responses around ~10 KiB).
     }
   }
   for (auto& id : toClose) closeStream(id, true);
