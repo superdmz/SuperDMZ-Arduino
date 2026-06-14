@@ -520,12 +520,13 @@ void fetchNodeInfo() {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  String url = String("https://") + PANEL_HOST + "/api/tunnel-status.php?token=" + savedToken;
+  String url = String("https://") + PANEL_HOST + "/api/tunnel-status.php";
   http.setTimeout(6000);
   if (!http.begin(client, url)) {
     logf("[node] http.begin failed");
     return;
   }
+  http.addHeader("X-Tunnel-Token", savedToken);   // token in the header, not the query string (keeps it out of access logs)
   int code = http.GET();
   if (code == 200) {
     nodeJson = http.getString();

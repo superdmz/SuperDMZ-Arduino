@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-06-14
+
+### Security
+- **Tunnel token no longer travels in the URL query string.** `resolveNodeUrl()`
+  now sends the token in the `X-Tunnel-Token` HTTP header instead of `?token=...`
+  when calling `/api/resolve-server.php`, so it can no longer leak into nginx /
+  proxy access logs. The `SmartIoT-Debug` example's `/api/tunnel-status.php` call
+  was updated the same way. The WebSocket `hello` already carried the token in
+  the message body (unchanged). Backward-compatible: the SuperDMZ panel accepts
+  the token via header or query during the transition, so older nodes/clients
+  keep working.
+
 ## [1.1.3] - 2026-06-13
 
 ### Fixed

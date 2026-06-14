@@ -70,8 +70,9 @@ String SuperDMZ::resolveNodeUrl() {
     return String("wss://") + _node + SUPERDMZ_WS_PATH;
   }
   HTTPClient http;
-  String url = String(SUPERDMZ_PANEL_API) + "/resolve-server.php?token=" + _token;
+  String url = String(SUPERDMZ_PANEL_API) + "/resolve-server.php";
   http.begin(url);
+  http.addHeader("X-Tunnel-Token", _token);   // token in the header, not the query string (keeps it out of access logs)
   http.setTimeout(8000);
   int code = http.GET();
   String wsUrl;

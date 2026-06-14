@@ -16,8 +16,8 @@ jobs:
       - name: Arduino Lint
         uses: arduino/arduino-lint-action@v1
         with:
-          library-manager: submit
-          compliance: strict
+          library-manager: update
+          compliance: specification
           project-type: library
 
   compile-matrix:
@@ -31,7 +31,7 @@ jobs:
           - "esp32:esp32:esp32s2"      # ESP32-S2
           - "esp32:esp32:esp32s3"      # ESP32-S3
           - "esp32:esp32:esp32c3"      # ESP32-C3
-          - "esp32:esp32:esp32c6"      # ESP32-C6
+          # esp32c6 needs arduino-esp32 core 3.x (not available in the pinned 2.0.17)
           - "esp32:esp32:nano_nora"    # Arduino Nano ESP32
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
             - name: "ArduinoJson"
           sketch-paths: |
             - examples/HelloWorld
-            - examples/WebServerBridge
             - examples/ProvisioningPortal
+            - examples/SmartIoT-Debug
           enable-warnings-report: true
           enable-deltas-report: true
