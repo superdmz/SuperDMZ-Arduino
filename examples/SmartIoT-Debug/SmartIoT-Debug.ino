@@ -22,6 +22,7 @@
 // devs in the same room don't collide.
 
 #include <WiFi.h>
+#include <WiFiUdp.h>     // raw UDP for real DNS probes (bypass lwIP cache)
 #include <WebServer.h>
 #include <Preferences.h>
 #include <DNSServer.h>
@@ -32,6 +33,7 @@
 #include <time.h>
 #include <SuperDMZ.h>
 #include <stdarg.h>
+#include <vector>
 
 #define RESET_PIN          0
 #define HOLD_RECONFIG_MS   3000
@@ -42,7 +44,7 @@
 #define PROBE_INTERVAL_MS  120000 // auto-probe every 120 s
 #define NODE_REFRESH_MS    300000 // refresh node metadata every 5 min
 #define PANEL_HOST         "superdmz.com"
-#define FW_VERSION         "2.0.0"   // firmware version — bump on every release
+#define FW_VERSION         "2.0.10"  // firmware version — bump on every release
 
 Preferences prefs;
 WebServer   server(80);          // shared between AP and STA in WIFI_AP_STA mode
@@ -79,7 +81,7 @@ void runProbes();
 void fetchNodeInfo();
 void syncNtp();
 void checkInternet();
-ProbeRes pDns(const char* host);
+ProbeRes pDns(const char* host, const char* dnsServerStr = "8.8.8.8");
 ProbeRes pTcp(const char* host, uint16_t port, uint32_t timeout);
 ProbeRes pTls(const char* host, uint16_t port);
 
@@ -350,8 +352,9 @@ void handleApiStatus() {
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &t);
     doc["date_utc"] = buf;
   }
-  // Inject cached node info if we have it.
-  if (nodeJson.length() > 2) {
+  // Inject cached node info ONLY when authenticated (tunnel online) — never show
+  // a node before the token has been accepted by the relay.
+  if (tunnel.isOnline() && nodeJson.length() > 2) {
     DynamicJsonDocument nd(1024);
     if (deserializeJson(nd, nodeJson) == DeserializationError::Ok && nd["node"].is<JsonObject>()) {
       doc["node"] = nd["node"];
@@ -359,6 +362,35 @@ void handleApiStatus() {
   }
   String body; serializeJson(doc, body);
   server.send(200, "application/json", body);
+}
+// Plain-text diagnostics dump. Opening /info confirms you flashed THIS sketch
+// (the route only exists here) and shows the LIB version compiled in
+// (tunnel.version() — won't even build against the old lib), the firmware
+// version, the exact build timestamp, and the node the lib actually resolved to.
+void handleInfo() {
+  logf("[http] GET /info");
+  String s; s.reserve(900);
+  s += "SuperDMZ ESP32 - /info\n----------------------\n";
+  s += "fw_version    : " FW_VERSION "\n";
+  s += "lib_version   : " + String(tunnel.version()) + "\n";
+  s += "build         : " __DATE__ " " __TIME__ "\n";
+  s += "chip          : " + String(ESP.getChipModel())
+     + " (" + String((int)ESP.getChipCores()) + " cores, "
+     + String((unsigned)ESP.getCpuFreqMHz()) + " MHz)\n";
+  s += "sdk           : " + String(ESP.getSdkVersion()) + "\n";
+  s += "free_heap     : " + String((unsigned)ESP.getFreeHeap()) + "\n";
+  s += "uptime_s      : " + String((unsigned)((millis() - bootMillis) / 1000)) + "\n";
+  s += "wifi_ssid     : " + WiFi.SSID() + "\n";
+  s += "wifi_ip       : " + WiFi.localIP().toString() + "\n";
+  s += "wifi_rssi     : " + String((int)WiFi.RSSI()) + "\n";
+  s += "mac           : " + WiFi.macAddress() + "\n";
+  s += "token         : " + (savedToken.length() >= 8 ? savedToken.substring(0, 8) + "..." : String("(none)")) + "\n";
+  s += "tunnel_online : " + String(tunnel.isOnline() ? "yes" : "no") + "\n";
+  { String nh = tunnel.nodeHost(); s += "node_resolved : " + (nh.length() ? nh : String("-")) + "\n"; }
+  s += "resolve_tries : " + String((unsigned)tunnel.resolveAttempts()) + "\n";
+  s += "resolve_last  : " + String(tunnel.lastResolveInfo()) + "\n";
+  s += "public_url    : " + String(tunnel.publicUrl()) + "\n";
+  server.send(200, "text/plain; charset=utf-8", s);
 }
 void handleReboot()  { logf("[cmd] reboot requested"); server.send(200, "application/json", "{\"ok\":true}"); delay(400); ESP.restart(); }
 void handleFactory() { logf("[cmd] factory reset requested"); server.send(200, "application/json", "{\"ok\":true}"); delay(400); factoryReset(); ESP.restart(); }
@@ -395,13 +427,101 @@ void handleOtaUpload() {
 }
 
 // ─── Network probes ──────────────────────────────────────────────────────────
-ProbeRes pDns(const char* host) {
-  ProbeRes r; r.name = String("DNS ") + host;
-  IPAddress ip; uint32_t t0 = millis();
-  r.ok = WiFi.hostByName(host, ip);
-  r.ms = millis() - t0;
-  r.detail = r.ok ? ip.toString() : "lookup failed";
-  return r;
+// DNS probe via raw UDP query — bypasses the lwIP DNS cache entirely so the
+// measured time reflects an actual round-trip to the upstream resolver. The
+// previous version called WiFi.hostByName() which returns from cache in 0 ms
+// after the first lookup and never actually exercises the network.
+//
+// Builds a minimal DNS query packet (12-byte header + QNAME labels + QTYPE=A +
+// QCLASS=IN), sends it to dnsServer:53 and parses the first A record from the
+// reply.
+ProbeRes pDns(const char* host, const char* dnsServerStr) {
+  ProbeRes r;
+  r.name = String("DNS ") + host + " @" + dnsServerStr;
+  IPAddress dnsServer;
+  if (!dnsServer.fromString(dnsServerStr)) {
+    r.ok = false; r.ms = 0; r.detail = "bad dns server"; return r;
+  }
+
+  // ── Build the question packet ────────────────────────────────────────
+  uint8_t pkt[256];
+  size_t  pktLen = 0;
+  // Header — 12 bytes
+  uint16_t txid = (uint16_t)(millis() & 0xFFFF);
+  pkt[pktLen++] = (txid >> 8) & 0xFF;
+  pkt[pktLen++] = txid & 0xFF;
+  pkt[pktLen++] = 0x01; pkt[pktLen++] = 0x00;   // flags: standard query, recursion desired
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x01;   // qd_count = 1
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x00;   // an_count
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x00;   // ns_count
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x00;   // ar_count
+  // QNAME — length-prefixed labels, null-terminated
+  const char* p = host;
+  while (*p && pktLen < sizeof(pkt) - 6) {
+    const char* dot = strchr(p, '.');
+    size_t labelLen = dot ? (size_t)(dot - p) : strlen(p);
+    if (labelLen == 0 || labelLen > 63) { r.ok = false; r.ms = 0; r.detail = "bad host"; return r; }
+    pkt[pktLen++] = (uint8_t)labelLen;
+    memcpy(pkt + pktLen, p, labelLen);
+    pktLen += labelLen;
+    p = dot ? (dot + 1) : (p + labelLen);
+  }
+  pkt[pktLen++] = 0x00;                            // root label
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x01;      // qtype A
+  pkt[pktLen++] = 0x00; pkt[pktLen++] = 0x01;      // qclass IN
+
+  // ── Send + receive ────────────────────────────────────────────────────
+  WiFiUDP udp;
+  if (!udp.begin(0)) { r.ok = false; r.ms = 0; r.detail = "udp.begin fail"; return r; }
+  uint32_t t0 = millis();
+  udp.beginPacket(dnsServer, 53);
+  udp.write(pkt, pktLen);
+  udp.endPacket();
+  while (millis() - t0 < 2500) {
+    int n = udp.parsePacket();
+    if (n > 0) {
+      uint8_t buf[512];
+      int len = udp.read(buf, sizeof(buf));
+      udp.stop();
+      r.ms = millis() - t0;
+      if (len < 12) { r.ok = false; r.detail = "short reply"; return r; }
+      if (buf[0] != ((txid >> 8) & 0xFF) || buf[1] != (txid & 0xFF)) {
+        r.ok = false; r.detail = "txid mismatch"; return r;
+      }
+      uint8_t rcode = buf[3] & 0x0F;
+      uint16_t anCount = (buf[6] << 8) | buf[7];
+      if (rcode != 0 || anCount == 0) {
+        r.ok = false;
+        r.detail = String("rcode=") + rcode + " an=" + anCount;
+        return r;
+      }
+      // Skip question section (we know its length)
+      size_t pos = 12;
+      while (pos < (size_t)len && buf[pos] != 0) {
+        pos += 1 + buf[pos];
+      }
+      pos += 1 + 4;   // null label + qtype + qclass
+      // Walk the answers, return the first A.
+      for (int i = 0; i < anCount && pos + 12 < (size_t)len; i++) {
+        // skip the name (pointer or labels)
+        if ((buf[pos] & 0xC0) == 0xC0) pos += 2;
+        else { while (pos < (size_t)len && buf[pos] != 0) pos += 1 + buf[pos]; pos += 1; }
+        uint16_t type = (buf[pos] << 8) | buf[pos+1]; pos += 2;
+        pos += 2;          // class
+        pos += 4;          // ttl
+        uint16_t rdlen = (buf[pos] << 8) | buf[pos+1]; pos += 2;
+        if (type == 1 && rdlen == 4 && pos + 4 <= (size_t)len) {
+          IPAddress ip(buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]);
+          r.ok = true; r.detail = ip.toString(); return r;
+        }
+        pos += rdlen;
+      }
+      r.ok = false; r.detail = "no A record in reply"; return r;
+    }
+    delay(2);
+  }
+  udp.stop();
+  r.ms = millis() - t0; r.ok = false; r.detail = "timeout"; return r;
 }
 ProbeRes pTcp(const char* host, uint16_t port, uint32_t timeout) {
   ProbeRes r; r.name = String("TCP ") + host + ":" + port;
@@ -436,21 +556,32 @@ void runProbes() {
     return;
   }
   logf("[probe] running probes...");
-  ProbeRes tests[] = {
-    pTcp ("8.8.8.8",                   53, 3000),  // Google DNS reachable
-    pTcp ("1.1.1.1",                   53, 3000),  // Cloudflare DNS reachable
-    pDns ("superdmz.com"),
-    pDns ("spo1.nodes.superdmz.com"),
-    pTcp ("superdmz.com",             443, 5000),
-    pTcp ("spo1.nodes.superdmz.com",  443, 5000),
-    pTls ("spo1.nodes.superdmz.com",  443),
-  };
+  // Always-on reachability checks (no token needed).
+  std::vector<ProbeRes> tests;
+  tests.push_back(pTcp("8.8.8.8", 53, 3000));               // Google DNS reachable
+  tests.push_back(pTcp("1.1.1.1", 53, 3000));               // Cloudflare DNS reachable
+  tests.push_back(pDns("superdmz.com", "8.8.8.8"));         // real DNS round-trip
+  tests.push_back(pDns("superdmz.com", "1.1.1.1"));         // cross-check via CF
+  tests.push_back(pTcp("superdmz.com", 443, 5000));
+  // Probe the relay node THIS token resolved to — not a hardcoded one. The lib
+  // fills nodeHost() in begin(); it stays empty when no token is configured
+  // yet, in which case we skip the node probes entirely.
+  String node = tunnel.nodeHost();
+  if (node.length() > 0) {
+    tests.push_back(pDns(node.c_str(), "8.8.8.8"));
+    tests.push_back(pDns(node.c_str(), "1.1.1.1"));
+    tests.push_back(pTcp(node.c_str(), 443, 5000));
+    tests.push_back(pTls(node.c_str(), 443));
+  } else {
+    logf("[probe] no token/node resolved yet - skipping node probes");
+  }
   DynamicJsonDocument doc(2048);
   doc["ran"] = true;
   doc["wifi_rssi"] = WiFi.RSSI();
   doc["wifi_ip"]   = WiFi.localIP().toString();
+  doc["node"]      = node;   // relay node probed ("" if none resolved yet)
   JsonArray arr = doc.createNestedArray("tests");
-  for (size_t i = 0; i < sizeof(tests)/sizeof(tests[0]); i++) {
+  for (size_t i = 0; i < tests.size(); i++) {
     JsonObject o = arr.createNestedObject();
     o["name"]   = tests[i].name;
     o["ok"]     = tests[i].ok;
@@ -571,6 +702,12 @@ void tryConnectSTA() {
              on ? "ONLINE" : "OFFLINE", url ? url : "(null)",
              tunnel.bytesIn(), tunnel.bytesOut());
       });
+      // Mirror every internal step of the library into the ring buffer so the
+      // /log endpoint shows DNS lookup, HTTPS POST, body read, JSON parse,
+      // WS connect/disconnect, etc. — never debug blind again. Lines from the
+      // lib are already prefixed with [SuperDMZ:<tag>] so they don't collide
+      // with the sketch's own [tag] convention.
+      tunnel.onLog([](const char* line) { logf("%s", line); });
       bool ok = tunnel.begin(savedToken.c_str(), 80);
       logf("[tunnel] begin() returned %s", ok ? "true" : "FALSE");
       fetchNodeInfo();
@@ -632,6 +769,7 @@ void setup() {
   server.on("/save/wifi",    HTTP_POST, handleSaveWifi);
   server.on("/save/token",   HTTP_POST, handleSaveToken);
   server.on("/api/status",   HTTP_GET,  handleApiStatus);
+  server.on("/info",         HTTP_GET,  handleInfo);
   server.on("/api/probe",    HTTP_POST, handleApiProbe);
   server.on("/api/probe",    HTTP_GET,  handleApiProbeLast);
   server.on("/api/reboot",   HTTP_POST, handleReboot);

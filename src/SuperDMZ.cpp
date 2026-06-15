@@ -3,12 +3,17 @@
 #include "SuperDMZ.h"
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <mbedtls/base64.h>
 
-#define SUPERDMZ_VERSION    "1.1.3"
+#define SUPERDMZ_VERSION    "1.1.14"
 #define SUPERDMZ_PANEL_API  "https://superdmz.com/api"
-#define SUPERDMZ_DEFAULT_NODE "spo1.nodes.superdmz.com"
 #define SUPERDMZ_WS_PATH    "/ws/tunnel"
+// NOTE: there is intentionally NO hardcoded default/fallback node. The node is
+// ALWAYS discovered from the panel for the given token; until that succeeds the
+// library does not dial anything (see begin()/loop()).
+#define SUPERDMZ_RESOLVE_TRIES 3
+#define SUPERDMZ_RERESOLVE_MS  10000  // while offline, re-resolve the node this often
 #define SUPERDMZ_PING_MS    20000
 // Sized for large dashboard HTML over the tunnel. Smaller than this leaves
 // the loopback TCP buffer perpetually full while WebServer.send_P() blocks
@@ -18,10 +23,30 @@
 
 SuperDMZ* SuperDMZ::_instance = nullptr;
 
+// ─── Structured logger ────────────────────────────────────────────────────────
+// Writes ONE line per call to Serial AND (if set) to the user-provided
+// callback, prefixed with "[SuperDMZ:<tag>] ". Use this instead of bare
+// Serial.print for every observable step in the library — that way the
+// SmartIoT-Debug example (or any other consumer) can mirror these lines into
+// a ring buffer that the dashboard exposes at /log, and debugging never
+// requires guessing again.
+void SuperDMZ::lg(const char* tag, const char* fmt, ...) {
+  char body[200];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(body, sizeof(body), fmt, ap);
+  va_end(ap);
+  char line[256];
+  snprintf(line, sizeof(line), "[SuperDMZ:%s] %s", tag, body);
+  Serial.println(line);
+  if (_logCb) _logCb(line);
+}
+
 // ─── ctor/dtor ────────────────────────────────────────────────────────────────
 SuperDMZ::SuperDMZ()
   : _localPort(0), _online(false), _bytesIn(0), _bytesOut(0),
-    _lastPingMs(0), _statusCb(nullptr) {
+    _lastPingMs(0), _statusCb(nullptr), _resolved(false), _lastResolveMs(0),
+    _resolveAttempts(0) {
   _instance = this;
 }
 
@@ -64,53 +89,172 @@ const char* SuperDMZ::typeName(MsgType t) {
   }
 }
 
+// ─── Library version ──────────────────────────────────────────────────────────
+const char* SuperDMZ::version() const { return SUPERDMZ_VERSION; }
+
 // ─── Resolve node URL via the panel ───────────────────────────────────────────
 String SuperDMZ::resolveNodeUrl() {
   if (_node.length() > 0) {
     return String("wss://") + _node + SUPERDMZ_WS_PATH;
   }
+  // One HTTPS lookup against the panel. Returns the "wss://node/ws/tunnel" URL,
+  // or "" on failure — callers retry (begin() a few times at startup, loop()
+  // periodically while offline). MUST use an explicit WiFiClientSecure:
+  // HTTPClient::begin(url) without one is unreliable on ESP32 (the TLS handshake
+  // intermittently fails). setInsecure() is fine here — this lookup only returns
+  // routing info; the WSS tunnel to the node is the actual trust boundary.
+  _resolveAttempts++;
+  lg("resolve", "attempt #%u — POST https://superdmz.com/api/resolve-server.php",
+     (unsigned)_resolveAttempts);
+
+  // DNS check first so we know whether a future failure is name resolution
+  // or the TCP/TLS handshake. ESP32 lwIP caches per name so a hit is "0 ms".
+  IPAddress panelIp;
+  uint32_t dnsStart = millis();
+  if (WiFi.hostByName("superdmz.com", panelIp)) {
+    lg("resolve", "DNS superdmz.com → %s (%lums)",
+       panelIp.toString().c_str(), (unsigned long)(millis() - dnsStart));
+  } else {
+    lg("resolve", "DNS superdmz.com FAILED (%lums)",
+       (unsigned long)(millis() - dnsStart));
+    _lastResolveInfo = "DNS failed";
+    return String("");
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
-  String url = String(SUPERDMZ_PANEL_API) + "/resolve-server.php";
-  http.begin(url);
-  http.addHeader("X-Tunnel-Token", _token);   // token in the header, not the query string (keeps it out of access logs)
-  http.setTimeout(8000);
-  int code = http.GET();
+  http.setConnectTimeout(6000);
+  http.setTimeout(6000);
   String wsUrl;
+  String url = String(SUPERDMZ_PANEL_API) + "/resolve-server.php";
+  uint32_t connStart = millis();
+  if (!http.begin(client, url)) {
+    lg("resolve", "http.begin() FAILED");
+    _lastResolveInfo = "http.begin() failed";
+    return String("");
+  }
+  // POST instead of GET: token MUST NOT appear in a query string (proxy logs).
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  http.addHeader("X-Tunnel-Token", _token);
+  http.addHeader("User-Agent", String("SuperDMZ-Arduino/") + SUPERDMZ_VERSION);
+  http.addHeader("Accept", "application/json");
+  String postBody = String("token=") + _token;
+  lg("resolve", "POST body=%u bytes, headers set", (unsigned)postBody.length());
+  int code = http.POST(postBody);
+  uint32_t connMs = millis() - connStart;
+  lg("resolve", "HTTPS POST done in %lums → HTTP %d", (unsigned long)connMs, code);
   if (code == 200) {
-    String body = http.getString();
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, body) == DeserializationError::Ok) {
-      const char* w = doc["ws_url"] | nullptr;
-      if (w) wsUrl = w;
+    // Read the body MANUALLY. Both http.getString() AND deserializeJson(doc,
+    // http.getStream()) intermittently return empty on ESP32 core 3.x + HTTPS
+    // — the headers come in, status is 200, but the body bytes are still
+    // arriving in another TCP segment. We loop on stream->available() until
+    // we either hit Content-Length or a short read timeout.
+    WiFiClient* stream = http.getStreamPtr();
+    int contentLength = http.getSize();
+    lg("resolve", "Content-Length=%d (-1 = chunked/unknown)", contentLength);
+    String body;
+    body.reserve(contentLength > 0 ? contentLength + 1 : 512);
+    uint32_t startMs = millis();
+    while (millis() - startMs < 3000) {
+      while (stream && stream->available()) {
+        body += (char) stream->read();
+        if (contentLength > 0 && (int)body.length() >= contentLength) break;
+      }
+      if (contentLength > 0 && (int)body.length() >= contentLength) break;
+      if (!http.connected() && (!stream || stream->available() == 0)) break;
+      delay(1);
     }
+    lg("resolve", "read body: %u bytes in %lums", (unsigned)body.length(),
+       (unsigned long)(millis() - startMs));
+    if (body.length() > 0) {
+      String preview = body.length() <= 80 ? body : body.substring(0, 80) + "...";
+      lg("resolve", "body[0..80]=%s", preview.c_str());
+    }
+    // Parse explicitly from char* + length to avoid any String overload magic
+    // that was making doc["ws_url"] come back null on a perfectly valid body.
+    StaticJsonDocument<512> doc;
+    DeserializationError err = deserializeJson(doc, body.c_str(), body.length());
+    lg("resolve", "JSON parse: %s (doc.size=%u)", err.c_str(), (unsigned)doc.size());
+    if (err == DeserializationError::Ok) {
+      // Use .as<const char*>() with explicit String construction — works even
+      // when operator|<const char*>() returns null inside the lib (still
+      // diagnosing why on arduino-esp32 core 3.x + ArduinoJson 6.x).
+      String wstr = doc["ws_url"].as<const char*>() ? String(doc["ws_url"].as<const char*>()) : String();
+      if (wstr.length() > 0) {
+        wsUrl = wstr;
+        String tname = doc["tunnel_name"].as<const char*>() ? String(doc["tunnel_name"].as<const char*>()) : String("?");
+        lg("resolve", "ws_url=%s tunnel_name=%s", wstr.c_str(), tname.c_str());
+      } else {
+        // Walk the JSON object so we know what keys ACTUALLY arrived.
+        JsonObjectConst obj = doc.as<JsonObjectConst>();
+        int n = 0;
+        for (JsonPairConst kv : obj) {
+          lg("resolve", "  doc[%d] key='%s' type=%s", n,
+             kv.key().c_str(),
+             kv.value().is<const char*>() ? "str"
+               : kv.value().is<int>() ? "int"
+               : kv.value().is<JsonObject>() ? "obj" : "?");
+          n++;
+        }
+        lg("resolve", "ws_url key missing or empty (iterated %d keys)", n);
+      }
+    }
+    _lastResolveInfo = wsUrl.length()
+      ? (String("OK ") + wsUrl)
+      : (String("HTTP 200 size=") + body.length()
+         + " err=" + err.c_str()
+         + " doc.size=" + doc.size());
+  } else {
+    _lastResolveInfo = String("HTTP ") + code;
   }
   http.end();
-  if (wsUrl.length() == 0) {
-    wsUrl = String("wss://") + SUPERDMZ_DEFAULT_NODE + SUPERDMZ_WS_PATH;
-    Serial.printf("[SuperDMZ] resolve failed (code=%d), using default %s\n", code, wsUrl.c_str());
-  }
+  if (wsUrl.length() == 0) lg("resolve", "FAIL — %s", _lastResolveInfo.c_str());
   return wsUrl;
 }
 
 // ─── begin / loop ─────────────────────────────────────────────────────────────
 bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node) {
   if (!token || strlen(token) < 16) {
-    Serial.println("[SuperDMZ] ERROR: invalid token");
+    lg("begin", "ERROR: invalid token");
     return false;
   }
   if (localPort == 0) {
-    Serial.println("[SuperDMZ] ERROR: localPort=0; pass your WebServer port (e.g. 80)");
+    lg("begin", "ERROR: localPort=0; pass your WebServer port (e.g. 80)");
     return false;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[SuperDMZ] WARN: WiFi not connected; will wait before dialing");
+    lg("begin", "WARN: WiFi not connected; will wait before dialing");
   }
   _token = token;
   _localPort = localPort;
   _node = node ? node : "";
 
-  String wsUrl = resolveNodeUrl();
-  // wsUrl tem formato "wss://<host>/ws/tunnel"
+  // Discover the node from the panel (a few quick attempts). On a weak link
+  // DNS/TLS often isn't ready in the first seconds after getting an IP, so this
+  // may fail — in that case we do NOT dial anything (there is no hardcoded
+  // fallback). loop() keeps trying until the panel answers, then dials the real
+  // node. The tunnel is therefore never sent to the wrong node.
+  String wsUrl;
+  for (int i = 0; i < SUPERDMZ_RESOLVE_TRIES && wsUrl.length() == 0; i++) {
+    wsUrl = resolveNodeUrl();
+    if (wsUrl.length() == 0 && i + 1 < SUPERDMZ_RESOLVE_TRIES) delay(600);
+  }
+  _resolved = (wsUrl.length() > 0);
+
+  _ws.onEvent(SuperDMZ::wsEventStatic);
+  if (_resolved) {
+    connectToUrl(wsUrl);
+  } else {
+    lg("begin", "node not resolved yet — not dialing; will keep trying in loop()");
+  }
+  _lastPingMs = millis();
+  _lastResolveMs = millis();
+  return true;
+}
+
+// Parse a "wss://host[:port]/path" URL and (re)dial the WebSocket to it.
+void SuperDMZ::connectToUrl(const String& wsUrl) {
   String host;
   uint16_t port = 443;
   String path = SUPERDMZ_WS_PATH;
@@ -127,19 +271,31 @@ bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node) {
     port = host.substring(colon + 1).toInt();
     host = host.substring(0, colon);
   }
-  Serial.printf("[SuperDMZ] connecting wss://%s:%u%s ...\n", host.c_str(), port, path.c_str());
-
-  _ws.onEvent(SuperDMZ::wsEventStatic);
+  _nodeHost = host;   // exposed via nodeHost() for diagnostics
+  lg("ws", "connecting wss://%s:%u%s ...", host.c_str(), port, path.c_str());
   _ws.beginSSL(host.c_str(), port, path.c_str());
   _ws.setReconnectInterval(5000);
   _ws.enableHeartbeat(SUPERDMZ_PING_MS, 60000, 2);   // WS-level ping 20s, pong wait 60s
-  _lastPingMs = millis();
-  return true;
 }
 
 void SuperDMZ::loop() {
   _ws.loop();
   pumpLocalToWs();
+
+  // Until the node is discovered, keep asking the panel. We never dial a
+  // fallback, so no WS is running yet — the lookup has the TLS stack entirely to
+  // itself (this also fixes the case where a constantly-reconnecting WS starved
+  // the lookup on RAM-tight chips / weak links). Once the panel answers, dial
+  // the real node — once. After that we stop (the WS auto-reconnects to it).
+  if (!_resolved && millis() - _lastResolveMs > SUPERDMZ_RERESOLVE_MS) {
+    _lastResolveMs = millis();
+    String u = resolveNodeUrl();
+    if (u.length() > 0) {
+      _resolved = true;
+      lg("loop", "node resolved — dialing it");
+      connectToUrl(u);
+    }
+  }
 }
 
 void SuperDMZ::reconnect() {
@@ -154,7 +310,7 @@ void SuperDMZ::wsEventStatic(WStype_t type, uint8_t* payload, size_t length) {
 void SuperDMZ::wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
-      Serial.println("[SuperDMZ] WS disconnected");
+      lg("ws", "DISCONNECTED");
       _online = false;
       if (_statusCb) _statusCb(false, _publicUrl.c_str());
       for (auto& kv : _streams) {
@@ -167,7 +323,8 @@ void SuperDMZ::wsEvent(WStype_t type, uint8_t* payload, size_t length) {
       break;
 
     case WStype_CONNECTED: {
-      Serial.println("[SuperDMZ] WS connected, sending hello");
+      lg("ws", "CONNECTED — sending hello (token=%.8s... port=%u)",
+         _token.c_str(), _localPort);
       // Hello carries platform + actual local config so a smart server can
       // self-correct a misconfigured tunnel (e.g. user picked HTTPS:443 in the
       // panel by accident; we'll keep telling them HTTP:<userPort> is the truth).
@@ -186,7 +343,7 @@ void SuperDMZ::wsEvent(WStype_t type, uint8_t* payload, size_t length) {
       break;
 
     case WStype_ERROR:
-      Serial.printf("[SuperDMZ] WS error: %.*s\n", (int)length, payload);
+      lg("ws", "ERROR: %.*s", (int)length, payload);
       break;
 
     default:
@@ -199,7 +356,7 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, payload, length);
   if (err) {
-    Serial.printf("[SuperDMZ] invalid envelope: %s\n", err.c_str());
+    lg("envelope", "invalid: %s", err.c_str());
     return;
   }
   const char* tStr = doc["t"] | "";
@@ -217,10 +374,10 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
         // Panel and code disagree on local_port — library wins. Log as info,
         // not warning: the user passed the right value to begin(), and the
         // server has been told (via hello) about the actual config.
-        Serial.printf("[SuperDMZ] note: panel says local_port=%u, library uses %u (library wins)\n",
-                      serverPort, _localPort);
+        lg("ready", "note: panel says local_port=%u, library uses %u (library wins)",
+           serverPort, _localPort);
       }
-      Serial.printf("[SuperDMZ] ONLINE: %s -> http://localhost:%u\n", pubUrl, _localPort);
+      lg("ready", "ONLINE: %s → http://localhost:%u", pubUrl, _localPort);
       if (_statusCb) _statusCb(true, pubUrl);
       break;
     }
@@ -247,7 +404,7 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
 
     case MSG_ERROR: {
       const char* msg = d.as<const char*>();
-      Serial.printf("[SuperDMZ] server error: %s\n", msg ? msg : "?");
+      lg("envelope", "server error: %s", msg ? msg : "?");
       break;
     }
 
@@ -265,8 +422,8 @@ void SuperDMZ::handleNewConn(const String& connId, uint16_t /*serverHintPort*/) 
   // have to keep two configs in sync.
   StreamState* s = new StreamState();
   if (!s->client.connect(IPAddress(127, 0, 0, 1), _localPort, 2000)) {
-    Serial.printf("[SuperDMZ][%s] failed to connect localhost:%u (is your WebServer up?)\n",
-                  connId.c_str(), _localPort);
+    lg("newconn", "[%s] failed to connect localhost:%u (is your WebServer up?)",
+       connId.c_str(), _localPort);
     delete s;
     sendEnvelope(MSG_CONNCLOSE, connId, "");
     return;

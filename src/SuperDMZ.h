@@ -34,7 +34,7 @@ class SuperDMZ {
   // Starts the tunnel. token = 48 hex chars (from the panel). localPort = your
   // local WebServer port (must match the local_port configured in the panel,
   // otherwise the lib logs a warning and no requests reach you).
-  // Optional node: node hostname (e.g. "spo1.nodes.superdmz.com"). If empty,
+  // Optional node: node hostname (e.g. "<node>.nodes.superdmz.com"). If empty,
   // the lib asks the panel via /api/resolve-server.php.
   bool begin(const char* token, uint16_t localPort, const char* node = "");
 
@@ -45,8 +45,28 @@ class SuperDMZ {
   typedef void (*StatusCb)(bool online, const char* publicUrl);
   void onStatus(StatusCb cb) { _statusCb = cb; }
 
+  // Optional structured log callback. Every internal step writes one line
+  // through this callback, prefixed with a tag like "net", "ws", "envelope".
+  // Sketches that maintain their own ring buffer (see SmartIoT-Debug) can
+  // forward the lines so they show up in the live /log view.
+  // The line passed in is short-lived — copy if you need to keep it.
+  // Default is no callback; lines still go to Serial via Serial.println.
+  typedef void (*LogCb)(const char* line);
+  void onLog(LogCb cb) { _logCb = cb; }
+
   bool isOnline() const { return _online; }
   const char* publicUrl() const { return _publicUrl.c_str(); }
+  // Relay node hostname this tunnel is connected to — but ONLY while the token
+  // is authenticated (tunnel online); empty otherwise. So UIs show the REAL
+  // node only once authenticated, never a guess or a not-yet-confirmed one.
+  const char* nodeHost() const { return _online ? _nodeHost.c_str() : ""; }
+  // Library version string compiled into the binary (e.g. "1.1.6"). Use this to
+  // verify which lib version actually got built — not just what the IDE reports
+  // as "installed".
+  const char* version() const;
+  // Node-lookup diagnostics (surfaced via /info in the SmartIoT-Debug example).
+  uint32_t    resolveAttempts() const { return _resolveAttempts; }
+  const char* lastResolveInfo() const { return _lastResolveInfo.c_str(); }
   uint32_t bytesIn()  const { return _bytesIn; }
   uint32_t bytesOut() const { return _bytesOut; }
 
@@ -83,15 +103,17 @@ class SuperDMZ {
   bool sendEnvelope(MsgType t, const String& connId, const String& payloadJson);
 
   // ── Resolve node URL ───────────────────────────────────────────────────────
-  String resolveNodeUrl();
+  String resolveNodeUrl();                     // one HTTPS lookup; "" on failure
+  void   connectToUrl(const String& wsUrl);    // parse "wss://…" + (re)dial the WS
 
   // ── State ──────────────────────────────────────────────────────────────────
   WebSocketsClient _ws;
   String _token;
-  String _node;          // e.g. spo1.nodes.superdmz.com
+  String _node;          // optional pin, e.g. "<node>.nodes.superdmz.com"
   uint16_t _localPort;   // user's local WebServer port
   bool _online;
   String _publicUrl;
+  String _nodeHost;      // relay node host resolved/used in begin()
   uint32_t _bytesIn;
   uint32_t _bytesOut;
 
@@ -99,6 +121,17 @@ class SuperDMZ {
 
   uint32_t _lastPingMs;
   StatusCb _statusCb;
+  LogCb    _logCb = nullptr;
+  bool     _resolved;        // true once a real node (not the fallback) resolved
+  uint32_t _lastResolveMs;   // last resolve attempt — drives loop() re-resolve
+  uint32_t _resolveAttempts; // total node lookups tried (diagnostics)
+  String   _lastResolveInfo; // last lookup outcome string (diagnostics)
+
+  // ── Internal structured logger ───────────────────────────────────────────────
+  // Writes one line to Serial AND, if set, to the user's LogCb. Use this for
+  // EVERY observable step inside the library so debugging never needs guesses
+  // (the SmartIoT-Debug example mirrors these into its /log ring buffer).
+  void lg(const char* tag, const char* fmt, ...);
 
   static SuperDMZ* _instance;  // singleton for the static WS callback
 };

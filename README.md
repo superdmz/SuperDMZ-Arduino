@@ -74,8 +74,11 @@ Chame em todo `loop()`. Mantém WSS vivo, processa requests, gerencia reconnect,
 
 ```cpp
 void onStatus(void (*cb)(bool online, const char* publicUrl));
+void onLog(void (*cb)(const char* line));
 ```
 Callback chamado quando o tunnel sobe/cai.
+
+O `onLog()` recebe uma linha por evento interno da lib, prefixada com `[SuperDMZ:<tag>]` (`resolve`, `ws`, `ready`, `envelope`, etc.). Use pra direcionar o tracing pra qualquer log/ring buffer do seu sketch — o `SmartIoT-Debug` faz exatamente isso e expõe tudo em `/log`.
 
 ```cpp
 bool isOnline();
