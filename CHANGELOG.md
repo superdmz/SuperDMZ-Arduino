@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-25
+
+### Added — Gateway support (target_host + multiple tunnels)
+- `begin()` gained an optional 4th argument `targetHost` (default `"127.0.0.1"`).
+  Each incoming connection is dialed to `targetHost:localPort` instead of always
+  loopback — so a Gateway can bridge to ANOTHER machine on the LAN
+  (e.g. `tunnel.begin(token, 80, "", "192.168.0.20")`). Mirrors the Go client's
+  `target_host`.
+- **Multiple `SuperDMZ` instances may now run at once** (one per tunnel). The WS
+  callback is dispatched through a per-instance capturing lambda instead of a
+  static singleton, so N tunnels with N tokens/targets coexist. Heap-bound on
+  vanilla ESP32 (~2-3 TLS tunnels); higher with PSRAM.
+
+### Changed
+- `handleNewConn()` dials `_targetHost` (was hardcoded `127.0.0.1`); the failure
+  log now prints the actual target.
+- Removed the `_instance`/`wsEventStatic` singleton plumbing.
+
 ## [1.1.14] - 2026-06-15
 
 ### Fixed (the actually-shippable one)

@@ -36,7 +36,13 @@ class SuperDMZ {
   // otherwise the lib logs a warning and no requests reach you).
   // Optional node: node hostname (e.g. "<node>.nodes.superdmz.com"). If empty,
   // the lib asks the panel via /api/resolve-server.php.
-  bool begin(const char* token, uint16_t localPort, const char* node = "");
+  // targetHost: the host the lib dials for each incoming connection. Defaults to
+  // loopback (expose THIS board's WebServer). A Gateway sets it to a LAN IP
+  // (e.g. "192.168.0.20") to bridge to another machine on the internal network —
+  // mirrors the Go client's target_host. Multiple SuperDMZ instances may run at
+  // once (one per tunnel), each with its own token + targetHost.
+  bool begin(const char* token, uint16_t localPort, const char* node = "",
+             const char* targetHost = "127.0.0.1");
 
   // Call from loop(). Keeps the WS alive, processes requests, manages reconnect.
   void loop();
@@ -89,7 +95,6 @@ class SuperDMZ {
 
   // ── WebSocket callbacks ────────────────────────────────────────────────────
   void wsEvent(WStype_t type, uint8_t* payload, size_t length);
-  static void wsEventStatic(WStype_t type, uint8_t* payload, size_t length);
   void handleEnvelope(uint8_t* payload, size_t length);
 
   // ── Per-conn handling ──────────────────────────────────────────────────────
@@ -111,6 +116,8 @@ class SuperDMZ {
   String _token;
   String _node;          // optional pin, e.g. "<node>.nodes.superdmz.com"
   uint16_t _localPort;   // user's local WebServer port
+  String   _targetHost = "127.0.0.1";  // host dialed per connection (loopback for
+                                       // self; a LAN IP in Gateway mode)
   bool _online;
   String _publicUrl;
   String _nodeHost;      // relay node host resolved/used in begin()
@@ -132,8 +139,6 @@ class SuperDMZ {
   // EVERY observable step inside the library so debugging never needs guesses
   // (the SmartIoT-Debug example mirrors these into its /log ring buffer).
   void lg(const char* tag, const char* fmt, ...);
-
-  static SuperDMZ* _instance;  // singleton for the static WS callback
 };
 
 #endif  // SUPERDMZ_H

@@ -6,7 +6,7 @@
 #include <WiFiClientSecure.h>
 #include <mbedtls/base64.h>
 
-#define SUPERDMZ_VERSION    "1.1.14"
+#define SUPERDMZ_VERSION    "1.2.0"
 #define SUPERDMZ_PANEL_API  "https://superdmz.com/api"
 #define SUPERDMZ_WS_PATH    "/ws/tunnel"
 // NOTE: there is intentionally NO hardcoded default/fallback node. The node is
@@ -20,8 +20,6 @@
 // trying to write, and the request gets cut after ~10 s. 4 KiB drains the
 // buffer in one pass for most responses.
 #define SUPERDMZ_BUF_SIZE   4096
-
-SuperDMZ* SuperDMZ::_instance = nullptr;
 
 // ─── Structured logger ────────────────────────────────────────────────────────
 // Writes ONE line per call to Serial AND (if set) to the user-provided
@@ -47,7 +45,6 @@ SuperDMZ::SuperDMZ()
   : _localPort(0), _online(false), _bytesIn(0), _bytesOut(0),
     _lastPingMs(0), _statusCb(nullptr), _resolved(false), _lastResolveMs(0),
     _resolveAttempts(0) {
-  _instance = this;
 }
 
 SuperDMZ::~SuperDMZ() {
@@ -58,7 +55,6 @@ SuperDMZ::~SuperDMZ() {
     }
   }
   _streams.clear();
-  _instance = nullptr;
 }
 
 // ─── Tipos do envelope ────────────────────────────────────────────────────────
@@ -214,7 +210,7 @@ String SuperDMZ::resolveNodeUrl() {
 }
 
 // ─── begin / loop ─────────────────────────────────────────────────────────────
-bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node) {
+bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node, const char* targetHost) {
   if (!token || strlen(token) < 16) {
     lg("begin", "ERROR: invalid token");
     return false;
@@ -229,6 +225,7 @@ bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node) {
   _token = token;
   _localPort = localPort;
   _node = node ? node : "";
+  _targetHost = (targetHost && *targetHost) ? targetHost : "127.0.0.1";
 
   // Discover the node from the panel (a few quick attempts). On a weak link
   // DNS/TLS often isn't ready in the first seconds after getting an IP, so this
@@ -242,7 +239,11 @@ bool SuperDMZ::begin(const char* token, uint16_t localPort, const char* node) {
   }
   _resolved = (wsUrl.length() > 0);
 
-  _ws.onEvent(SuperDMZ::wsEventStatic);
+  // Per-instance dispatch via a capturing lambda — lets several SuperDMZ
+  // instances coexist (a Gateway runs one per assigned tunnel). No singleton.
+  _ws.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
+    this->wsEvent(type, payload, length);
+  });
   if (_resolved) {
     connectToUrl(wsUrl);
   } else {
@@ -303,10 +304,6 @@ void SuperDMZ::reconnect() {
 }
 
 // ─── WS event dispatcher ──────────────────────────────────────────────────────
-void SuperDMZ::wsEventStatic(WStype_t type, uint8_t* payload, size_t length) {
-  if (_instance) _instance->wsEvent(type, payload, length);
-}
-
 void SuperDMZ::wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
@@ -421,9 +418,11 @@ void SuperDMZ::handleNewConn(const String& connId, uint16_t /*serverHintPort*/) 
   // as HTTPS:443 by accident), we silently override it. The user shouldn't
   // have to keep two configs in sync.
   StreamState* s = new StreamState();
-  if (!s->client.connect(IPAddress(127, 0, 0, 1), _localPort, 2000)) {
-    lg("newconn", "[%s] failed to connect localhost:%u (is your WebServer up?)",
-       connId.c_str(), _localPort);
+  // Dial the configured target: loopback for self-hosting, or a LAN IP in
+  // Gateway mode. WiFiClient::connect resolves an IP string or a hostname.
+  if (!s->client.connect(_targetHost.c_str(), _localPort, 2000)) {
+    lg("newconn", "[%s] failed to connect %s:%u (is the target up / reachable?)",
+       connId.c_str(), _targetHost.c_str(), _localPort);
     delete s;
     sendEnvelope(MSG_CONNCLOSE, connId, "");
     return;
