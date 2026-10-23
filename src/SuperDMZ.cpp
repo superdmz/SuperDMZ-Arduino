@@ -5,8 +5,9 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <mbedtls/base64.h>
+#include <ctype.h>   // tolower, for the Content-Length lookup
 
-#define SUPERDMZ_VERSION    "1.2.0"
+#define SUPERDMZ_VERSION    "1.2.1"
 #define SUPERDMZ_PANEL_API  "https://superdmz.com/api"
 #define SUPERDMZ_WS_PATH    "/ws/tunnel"
 // NOTE: there is intentionally NO hardcoded default/fallback node. The node is
@@ -15,6 +16,20 @@
 #define SUPERDMZ_RESOLVE_TRIES 3
 #define SUPERDMZ_RERESOLVE_MS  10000  // while offline, re-resolve the node this often
 #define SUPERDMZ_PING_MS    20000
+// Largest request held in RAM while waiting for its body. Above this the
+// connection falls back to dialing and streaming, which is what every version
+// up to 1.2.0 always did. Keep it modest: this is transient heap on a board
+// that is already paying for WiFi + TLS.
+#define SUPERDMZ_MAX_PENDING    16384
+// Heap floor. Below this, stop buffering and dial right away rather than risk
+// an allocation failure, which on Arduino aborts the sketch instead of failing.
+#define SUPERDMZ_MIN_FREE_HEAP  24576
+// A request with no Content-Length (a chunked body) never completes by
+// counting, so dial once the relay has been quiet this long.
+#define SUPERDMZ_DIAL_IDLE_MS   1200
+// A request whose announced body never finishes arriving is given up on, so a
+// lost frame cannot leak the stream forever.
+#define SUPERDMZ_PENDING_MAX_MS 10000
 // Sized for large dashboard HTML over the tunnel. Smaller than this leaves
 // the loopback TCP buffer perpetually full while WebServer.send_P() blocks
 // trying to write, and the request gets cut after ~10 s. 4 KiB drains the
@@ -410,6 +425,31 @@ void SuperDMZ::handleEnvelope(uint8_t* payload, size_t length) {
   }
 }
 
+// Case-insensitive Content-Length lookup inside the header block. Returns -1
+// when the header is absent, which is the normal case for GET and for a body
+// sent with chunked transfer-encoding.
+static long sdmzContentLength(const std::vector<uint8_t>& b, size_t headerEnd) {
+  static const char kName[] = "content-length:";
+  const size_t nameLen = sizeof(kName) - 1;
+  for (size_t i = 1; i + nameLen < headerEnd; i++) {
+    if (b[i - 1] != '\n') continue;            // header names start a line
+    size_t k = 0;
+    while (k < nameLen && (char)tolower(b[i + k]) == kName[k]) k++;
+    if (k != nameLen) continue;
+    size_t p = i + nameLen;
+    while (p < headerEnd && (b[p] == ' ' || b[p] == '\t')) p++;
+    long v = 0;
+    bool any = false;
+    while (p < headerEnd && b[p] >= '0' && b[p] <= '9') {
+      v = v * 10 + (b[p] - '0');
+      p++;
+      any = true;
+    }
+    return any ? v : -1;
+  }
+  return -1;
+}
+
 // ─── Per-conn ─────────────────────────────────────────────────────────────────
 void SuperDMZ::handleNewConn(const String& connId, uint16_t /*serverHintPort*/) {
   // The lib ALWAYS uses the port the user passed to begin() — they know where
@@ -417,24 +457,65 @@ void SuperDMZ::handleNewConn(const String& connId, uint16_t /*serverHintPort*/) 
   // is configured with a different local_port (e.g. someone created the tunnel
   // as HTTPS:443 by accident), we silently override it. The user shouldn't
   // have to keep two configs in sync.
+  //
+  // Up to 1.2.0 the target was dialed right here. It must not be: the relay
+  // delivers a request in separate frames — headers first, body after — and
+  // WebServer.h blocks inside handleClient() the moment it reads a
+  // Content-Length it cannot satisfy. That block stops the sketch loop, so
+  // tunnel.loop() never runs, so the body is never forwarded; the server gives
+  // up after HTTP_MAX_POST_WAIT and closes without answering, and the visitor
+  // gets a 502. Measured on tunnel 4xqhu8x2 on 23/10/2026: every POST carrying
+  // a body died at 5,15 s, while GET and POST with Content-Length: 0 answered
+  // normally — the two shapes that need no second frame.
+  //
+  // So the dial waits for dialAndFlush(), once the request is whole.
   StreamState* s = new StreamState();
-  // Dial the configured target: loopback for self-hosting, or a LAN IP in
-  // Gateway mode. WiFiClient::connect resolves an IP string or a hostname.
-  if (!s->client.connect(_targetHost.c_str(), _localPort, 2000)) {
-    lg("newconn", "[%s] failed to connect %s:%u (is the target up / reachable?)",
-       connId.c_str(), _targetHost.c_str(), _localPort);
-    delete s;
-    sendEnvelope(MSG_CONNCLOSE, connId, "");
-    return;
-  }
   s->active = true;
   s->lastByteMs = millis();
   _streams[connId] = s;
 }
 
+bool SuperDMZ::requestComplete(StreamState* s) {
+  if (s->headerEnd < 0) {
+    if (s->inbuf.size() < 4) return false;
+    for (size_t i = 0; i + 3 < s->inbuf.size(); i++) {
+      if (s->inbuf[i] == '\r' && s->inbuf[i + 1] == '\n' &&
+          s->inbuf[i + 2] == '\r' && s->inbuf[i + 3] == '\n') {
+        s->headerEnd = (int)(i + 4);
+        break;
+      }
+    }
+    if (s->headerEnd < 0) return false;
+    s->contentLength = sdmzContentLength(s->inbuf, (size_t)s->headerEnd);
+    lg("newconn", "header complete (%d bytes), content-length=%ld",
+       s->headerEnd, s->contentLength);
+  }
+  if (s->contentLength <= 0) return true;
+  return s->inbuf.size() >= (size_t)s->headerEnd + (size_t)s->contentLength;
+}
+
+bool SuperDMZ::dialAndFlush(const String& connId, StreamState* s) {
+  // Dial the configured target: loopback for self-hosting, or a LAN IP in
+  // Gateway mode. WiFiClient::connect resolves an IP string or a hostname.
+  if (!s->client.connect(_targetHost.c_str(), _localPort, 2000)) {
+    lg("newconn", "[%s] failed to connect %s:%u (is the target up / reachable?)",
+       connId.c_str(), _targetHost.c_str(), _localPort);
+    return false;
+  }
+  s->dialed = true;
+  if (!s->inbuf.empty()) {
+    s->client.write(s->inbuf.data(), s->inbuf.size());
+    s->inbuf.clear();
+    s->inbuf.shrink_to_fit();
+  }
+  s->lastByteMs = millis();
+  return true;
+}
+
 void SuperDMZ::handleData(const String& connId, const String& b64) {
   auto it = _streams.find(connId);
   if (it == _streams.end() || !it->second || !it->second->active) return;
+  StreamState* s = it->second;
 
   size_t outLen = 0;
   size_t inLen = b64.length();
@@ -444,11 +525,33 @@ void SuperDMZ::handleData(const String& connId, const String& b64) {
 
   int rc = mbedtls_base64_decode(buf, maxOut, &outLen,
                                  (const uint8_t*)b64.c_str(), inLen);
+  bool dialFailed = false;
   if (rc == 0 && outLen > 0) {
     _bytesIn += outLen;
-    it->second->client.write(buf, outLen);
+    s->lastByteMs = millis();
+    if (s->dialed) {
+      // Already dialed: either the body outgrew SUPERDMZ_MAX_PENDING and we
+      // are streaming it, or this is a follow-up on the same connection.
+      s->client.write(buf, outLen);
+    } else {
+      s->inbuf.insert(s->inbuf.end(), buf, buf + outLen);
+      // Over the cap, or running low on heap, the old streaming behaviour is
+      // the lesser evil: it is what 1.2.0 and earlier always did, and a local
+      // server that does not block on a partial body (ESPAsyncWebServer) keeps
+      // working. Answering 413 here instead would break those uploads.
+      bool overCap = s->inbuf.size() >= SUPERDMZ_MAX_PENDING ||
+                     ESP.getFreeHeap() < SUPERDMZ_MIN_FREE_HEAP;
+      if (requestComplete(s) || overCap) {
+        if (overCap && !requestComplete(s)) {
+          lg("newconn", "[%s] request over buffer cap (%u bytes) — streaming",
+             connId.c_str(), (unsigned)s->inbuf.size());
+        }
+        if (!dialAndFlush(connId, s)) dialFailed = true;
+      }
+    }
   }
   free(buf);
+  if (dialFailed) closeStream(connId, true);
 }
 
 void SuperDMZ::handleConnClose(const String& connId) {
@@ -473,6 +576,27 @@ void SuperDMZ::pumpLocalToWs() {
   for (auto& kv : _streams) {
     StreamState* s = kv.second;
     if (!s || !s->active) continue;
+
+    if (!s->dialed) {
+      // Still buffering. Two ways out, and the difference between them is the
+      // whole point: a request with NO Content-Length (chunked) can never
+      // complete by counting, so it is dialed once the relay goes quiet. One
+      // that announced a length is NOT dialed early — handing the local server
+      // a request whose body is still missing is exactly the deadlock this
+      // buffering exists to prevent, and on a slow link it would come back as
+      // an intermittent 502. That one only gets given up on, so a lost frame
+      // cannot leak the stream.
+      uint32_t idle = millis() - s->lastByteMs;
+      if (s->headerEnd >= 0 && s->contentLength < 0 && idle > SUPERDMZ_DIAL_IDLE_MS) {
+        if (!dialAndFlush(kv.first, s)) toClose.push_back(kv.first);
+      } else if (idle > SUPERDMZ_PENDING_MAX_MS) {
+        lg("newconn", "[%s] incomplete request after %u ms — giving up",
+           kv.first.c_str(), (unsigned)idle);
+        toClose.push_back(kv.first);
+      }
+      continue;
+    }
+
     // Detecta socket fechado pelo lado local (WebServer terminou response).
     if (!s->client.connected() && s->client.available() == 0) {
       toClose.push_back(kv.first);

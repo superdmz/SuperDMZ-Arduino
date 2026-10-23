@@ -25,6 +25,7 @@
 #include <WebSocketsClient.h>
 #include <WiFi.h>
 #include <map>
+#include <vector>
 
 class SuperDMZ {
  public:
@@ -87,10 +88,17 @@ class SuperDMZ {
   static const char* typeName(MsgType t);
 
   // Per-connection: local TCP socket + bookkeeping.
+  //
+  // The request is held in inbuf and the target is dialed only once the whole
+  // request is in hand - see handleData() for the failure this prevents.
   struct StreamState {
     WiFiClient client;
     bool active = false;
     uint32_t lastByteMs = 0;
+    bool dialed = false;             // target connected and inbuf flushed
+    std::vector<uint8_t> inbuf;      // request bytes held before dialing
+    int  headerEnd = -1;             // index just past the "\r\n\r\n", -1 if unseen
+    long contentLength = -1;         // from the header block; -1 when absent
   };
 
   // ── WebSocket callbacks ────────────────────────────────────────────────────
@@ -100,6 +108,12 @@ class SuperDMZ {
   // ── Per-conn handling ──────────────────────────────────────────────────────
   void handleNewConn(const String& connId, uint16_t localPort);
   void handleData(const String& connId, const String& b64);
+  // True once inbuf holds the header block plus the body its Content-Length
+  // announces. A request without Content-Length is complete with its headers.
+  bool requestComplete(StreamState* s);
+  // Connects to the target and writes everything buffered so far, in one go.
+  // False when the target refused the connection; the caller then closes.
+  bool dialAndFlush(const String& connId, StreamState* s);
   void handleConnClose(const String& connId);
   void pumpLocalToWs();   // called every loop() — drains local TCP, sends via WS
   void closeStream(const String& connId, bool notifyServer);

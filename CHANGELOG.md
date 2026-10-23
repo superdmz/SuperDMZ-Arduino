@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-23
+
+### Fixed
+- Any request carrying a body (POST or PUT with a payload) got no answer
+  through the tunnel, and the visitor saw a 502. `handleNewConn()` dialed the
+  target the moment the relay announced the connection, so the local server
+  was handed the header block before the body existed. `WebServer.h` then
+  blocked inside `handleClient()` waiting for the `Content-Length` bytes — and
+  that block stops the sketch loop, so `tunnel.loop()` never ran, so the body
+  was never forwarded. The server gave up after `HTTP_MAX_POST_WAIT` and closed
+  without answering.
+
+  Measured on a live tunnel: every POST with a body died at 5,15 s, while GET
+  and `POST` with `Content-Length: 0` answered normally — precisely the two
+  shapes that need no second frame. Every login form, config form and file
+  upload served through `WebServer.h` was affected, on every version up to
+  1.2.0. Sketches using ESPAsyncWebServer were not: it does not block the loop.
+
+  The target is now dialed by `dialAndFlush()`, only once the whole request is
+  buffered, so the local server finds headers and body already waiting in the
+  socket and never has to wait for a frame the loop cannot deliver.
+
+  A request with no `Content-Length` (a chunked body) cannot complete by
+  counting, so it is dialed once the relay has been quiet for
+  `SUPERDMZ_DIAL_IDLE_MS`. A request that announced a length is deliberately
+  NOT dialed on idle: handing the local server a request whose body is still
+  missing is the very deadlock this change removes, and on a slow link it would
+  return as an intermittent 502. Such a request is only given up on, after
+  `SUPERDMZ_PENDING_MAX_MS`, so a lost frame cannot leak the stream.
+
+### Known limit
+- A body larger than `SUPERDMZ_MAX_PENDING` (16 KiB), or one still arriving
+  when free heap drops under `SUPERDMZ_MIN_FREE_HEAP` (24 KiB), falls back to
+  dialing and streaming — what every version up to 1.2.0 always did. With
+  `WebServer.h` such an upload can still deadlock.
+
+  Answering `413` at the cap was considered and rejected: it would break large
+  uploads that work today on ESPAsyncWebServer, which the library cannot
+  distinguish from a blocking server. Covering any body size needs the tunnel
+  running on its own FreeRTOS task. Note that the 1.2.0 attempt at that was
+  abandoned because `_ws.beginSSL()` in `begin()` raced with `_ws.loop()` in
+  the task — if retried, `beginSSL()` must move inside the task as its first
+  action.
+
 ## [1.2.0] - 2026-06-25
 
 ### Added — Gateway support (target_host + multiple tunnels)
